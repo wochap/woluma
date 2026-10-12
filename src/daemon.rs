@@ -1,8 +1,9 @@
 //! Wires luma, clock and ALS inputs into per-output engines and dispatches hooks.
 
+use crate::als::{self, AlsReading, Sampler};
 use crate::brightness::{self, backlight::Backlight, ddc::Ddc, Controller, Device, Msg};
 use crate::capture;
-use crate::config::{Backend, Config, Output, DEFAULT_POLL};
+use crate::config::{Als, Backend, Config, Output, DEFAULT_ALS_INTERVAL, DEFAULT_POLL};
 use crate::hooks::{self, HookQueue, Job};
 use crate::rules::{Engine, Inputs, Transition};
 use anyhow::{Context, Result};
@@ -10,26 +11,20 @@ use async_signal::{Signal, Signals};
 use chrono::{NaiveTime, Timelike};
 use futures_lite::StreamExt;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const MAX_TICK: Duration = Duration::from_secs(60);
 /// Lands clock ticks just past a boundary rather than on it.
 const TICK_SLACK: Duration = Duration::from_millis(50);
+/// How long shutdown waits for an in-flight ambient sample to restore the camera.
+const ALS_SHUTDOWN_WAIT: Duration = Duration::from_secs(5);
 
 enum Event {
     Luma(usize, u8),
-    Als(Option<u8>),
+    Als(AlsReading),
     Tick,
     Shutdown,
-}
-
-/// Ambient light stub: never yields, so the reading stays unknown.
-fn als_stub() -> (
-    async_channel::Sender<Option<u8>>,
-    async_channel::Receiver<Option<u8>>,
-) {
-    async_channel::unbounded()
 }
 
 /// Delay until the next configured time boundary, at most `MAX_TICK`.
@@ -146,7 +141,13 @@ async fn run_async(config: Config) -> Result<()> {
         .detach();
     }
 
-    let (_als_sender, als) = als_stub();
+    let interval = match &config.als {
+        Als::Webcam { interval, .. } | Als::Iio { interval, .. } => *interval,
+        Als::None => DEFAULT_ALS_INTERVAL,
+    };
+    let (sampler, als) = Sampler::spawn(als::source(&config.als), interval);
+    // Latest reading, for status output.
+    let als_status: Arc<Mutex<Option<AlsReading>>> = Arc::new(Mutex::new(None));
     {
         let events = events.clone();
         smol::spawn(async move {
@@ -172,9 +173,6 @@ async fn run_async(config: Config) -> Result<()> {
         .detach();
     }
 
-    if config.als != crate::config::Als::None {
-        log::info!("Ambient light sources are not supported yet; the ALS reading stays unknown");
-    }
     if !config.general.enabled {
         log::info!("Daemon is disabled: rules are tracked but brightness and hooks are left alone");
     }
@@ -229,11 +227,13 @@ async fn run_async(config: Config) -> Result<()> {
             }
             Event::Als(_) | Event::Tick => {
                 if let Event::Als(reading) = event {
-                    if reading == als_value {
+                    log::debug!("als {reading}");
+                    let value = reading.value;
+                    *als_status.lock().unwrap() = Some(reading);
+                    if value == als_value {
                         continue;
                     }
-                    log::trace!("als {reading:?}");
-                    als_value = reading;
+                    als_value = value;
                 }
                 for (engine, controller) in engines.iter_mut().zip(&controllers) {
                     if let Some(last) = engine.last_inputs() {
@@ -254,6 +254,7 @@ async fn run_async(config: Config) -> Result<()> {
     }
 
     capture_active.store(false, Ordering::Relaxed);
+    sampler.shutdown(ALS_SHUTDOWN_WAIT).await;
     hooks_shutdown.store(true, Ordering::Relaxed);
     for controller in controllers {
         controller.close().await;

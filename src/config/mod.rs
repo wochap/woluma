@@ -62,9 +62,21 @@ impl Default for Hysteresis {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Als {
     None,
-    Webcam { device: String },
-    Iio { path: Option<String> },
+    Webcam {
+        device: String,
+        interval: Duration,
+        frames: u32,
+        exposure: u32,
+    },
+    Iio {
+        /// Explicit sysfs device directory; `None` discovers the first sensor.
+        device: Option<String>,
+        interval: Duration,
+    },
 }
+
+pub const DEFAULT_ALS_INTERVAL: Duration = Duration::from_secs(60);
+pub const DEFAULT_ALS_FRAMES: u32 = 10;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Backend {

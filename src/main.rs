@@ -1,3 +1,4 @@
+mod als;
 mod brightness;
 mod capture;
 mod config;

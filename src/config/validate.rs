@@ -1,6 +1,6 @@
 use super::{
     parse_duration, raw, Als, Backend, Config, ConfigErrors, General, Hysteresis, ManualOverride,
-    Output,
+    Output, DEFAULT_ALS_FRAMES, DEFAULT_ALS_INTERVAL,
 };
 use crate::rules::{parse_num_cond, parse_time_range, Rule, When};
 use std::collections::HashSet;
@@ -142,21 +142,66 @@ fn als(raw: Option<raw::Als>, errors: &mut Errors) -> Als {
             );
         }
     };
+    let interval = raw
+        .interval
+        .as_ref()
+        .and_then(|v| match duration(v, "als.interval", errors) {
+            Some(d) if d.is_zero() => {
+                errors.push("als.interval", "must be greater than zero");
+                None
+            }
+            d => d,
+        })
+        .unwrap_or(DEFAULT_ALS_INTERVAL);
     match raw.source.as_str() {
         "none" => {
-            reject(errors, "device", raw.device.is_some(), "none");
-            reject(errors, "path", raw.path.is_some(), "none");
+            for (key, set) in [
+                ("device", raw.device.is_some()),
+                ("interval", raw.interval.is_some()),
+                ("frames", raw.frames.is_some()),
+                ("exposure", raw.exposure.is_some()),
+            ] {
+                reject(errors, key, set, "none");
+            }
             Als::None
         }
         "webcam" => {
-            reject(errors, "path", raw.path.is_some(), "webcam");
+            let frames = match raw.frames {
+                None => DEFAULT_ALS_FRAMES,
+                Some(f @ 1..=60) => f as u32,
+                Some(f) => {
+                    errors.push("als.frames", format!("{f} is out of range 1-60"));
+                    DEFAULT_ALS_FRAMES
+                }
+            };
+            let exposure = match raw.exposure {
+                Some(e) if e > 0 && e <= u32::MAX as i64 => e as u32,
+                Some(e) => {
+                    errors.push("als.exposure", format!("{e} must be a positive integer"));
+                    0
+                }
+                None => {
+                    errors.push(
+                        "als.exposure",
+                        "required for source \"webcam\" (exposure_time_absolute while sampling, e.g. 600)",
+                    );
+                    0
+                }
+            };
             Als::Webcam {
                 device: raw.device.unwrap_or_else(|| "/dev/video0".into()),
+                interval,
+                frames,
+                exposure,
             }
         }
         "iio" => {
-            reject(errors, "device", raw.device.is_some(), "iio");
-            Als::Iio { path: raw.path }
+            reject(errors, "frames", raw.frames.is_some(), "iio");
+            reject(errors, "exposure", raw.exposure.is_some(), "iio");
+            Als::Iio {
+                device: raw.device,
+                interval,
+            }
         }
         other => {
             errors.push(

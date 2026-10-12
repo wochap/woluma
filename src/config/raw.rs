@@ -36,10 +36,13 @@ pub struct Hysteresis {
 #[serde(deny_unknown_fields)]
 pub struct Als {
     pub source: String,
-    /// webcam: video device path.
+    /// webcam: video device path; iio: sysfs device path.
     pub device: Option<String>,
-    /// iio: sysfs device path.
-    pub path: Option<String>,
+    pub interval: Option<toml::Value>,
+    /// webcam only.
+    pub frames: Option<i64>,
+    /// webcam only: `exposure_time_absolute` while sampling.
+    pub exposure: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]

@@ -89,6 +89,8 @@ als = 1.5
 [als]
 source = "webcam"
 device = "/dev/video2"
+interval = "30s"
+exposure = 600
 
 [outputs.DP-1]
 ddcutil = "DELL U2720Q"
@@ -122,7 +124,10 @@ run = ["true"]
     assert_eq!(
         config.als,
         Als::Webcam {
-            device: "/dev/video2".into()
+            device: "/dev/video2".into(),
+            interval: Duration::from_secs(30),
+            frames: 10,
+            exposure: 600,
         }
     );
     let output = &config.outputs[0];
@@ -172,17 +177,43 @@ fn als_sources() {
     );
     assert_eq!(
         parse(&format!(
-            "[als]\nsource = \"iio\"\npath = \"/sys/x\"\n{MINIMAL}"
+            "[als]\nsource = \"iio\"\ndevice = \"/sys/x\"\n{MINIMAL}"
         ))
         .unwrap()
         .als,
         Als::Iio {
-            path: Some("/sys/x".into())
+            device: Some("/sys/x".into()),
+            interval: Duration::from_secs(60),
         }
     );
     assert_error(
-        &format!("[als]\nsource = \"iio\"\ndevice = \"/dev/video0\"\n{MINIMAL}"),
-        &["als.device"],
+        &format!("[als]\nsource = \"iio\"\nexposure = 600\n{MINIMAL}"),
+        &["als.exposure"],
+    );
+}
+
+#[test]
+fn als_webcam_fields() {
+    let webcam = |extra: &str| format!("[als]\nsource = \"webcam\"\n{extra}\n{MINIMAL}");
+    assert_error(&webcam(""), &["als.exposure", "required"]);
+    assert_error(&webcam("exposure = 0"), &["als.exposure"]);
+    assert_error(
+        &webcam("exposure = 600\nframes = 0"),
+        &["als.frames", "1-60"],
+    );
+    assert_error(&webcam("exposure = 600\nframes = 61"), &["als.frames"]);
+    assert_error(
+        &webcam("exposure = 600\ninterval = \"0s\""),
+        &["als.interval"],
+    );
+    assert_eq!(
+        parse(&webcam("exposure = 600")).unwrap().als,
+        Als::Webcam {
+            device: "/dev/video0".into(),
+            interval: Duration::from_secs(60),
+            frames: 10,
+            exposure: 600,
+        }
     );
 }
 
