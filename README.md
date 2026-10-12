@@ -139,6 +139,66 @@ or after 30 s at most), woluma takes the current level as its own.
 - **DDC/CI**: load the `i2c-dev` kernel module (`modprobe i2c-dev`, or add it to
   `/etc/modules-load.d/`) and give your user access to `/dev/i2c-*` (often the `i2c` group).
 
+## Commands
+
+| Command | What it does |
+| --- | --- |
+| `woluma` / `woluma daemon` | Run the daemon and serve the control socket |
+| `woluma toggle [OUTPUT\|*]` | Enable/disable automation (default `*`). `*` turns everything off if anything is on, otherwise everything on. Enabling applies the current rule and runs its hooks right away |
+| `woluma pause OUTPUT\|* [DURATION]` | Pause until resumed, or for `90s`, `15m`, `1h30m`, ... |
+| `woluma resume OUTPUT\|*` | Clear any pause (manual or manual-override) and apply the current rule now |
+| `woluma status [--json]` | Current state as a table, or one line of JSON |
+| `woluma watch [--raw\|--json]` | Live stream: `TIME OUTPUT LUMA ALS RULE BRIGHTNESS STATE`; `--raw` shows only `TIME OUTPUT LUMA ALS CLOCK`; `--json` prints NDJSON |
+| `woluma check [--offline]` | Validate the config, warn about missing fallbacks, unreachable rules and disconnected outputs, and print the rule each output matches now. `--offline` only validates (no Wayland, socket or hardware access) |
+
+`--config PATH` overrides the config file for `daemon`, `watch` and `check`. Unknown values
+print as `--`.
+
+Exit codes: `0` success, `1` runtime error (including an error reply from the daemon or an
+invalid config), `2` usage error, `3` daemon not running (`toggle`, `pause`, `resume`,
+`status`).
+
+### Control socket
+
+The daemon listens on `$XDG_RUNTIME_DIR/woluma.sock` (mode `0600`). Each connection sends
+one JSON request line; one-shot requests get one response line, then the connection closes.
+
+```sh
+echo '{"cmd":"status"}' | socat - UNIX-CONNECT:$XDG_RUNTIME_DIR/woluma.sock
+# {"ok":true,"status":{"version":"0.1.0","time":"...","als":{"source":"webcam","value":null},"outputs":[...]}}
+echo '{"cmd":"toggle","target":"eDP-1"}' | socat - UNIX-CONNECT:$XDG_RUNTIME_DIR/woluma.sock
+echo '{"cmd":"pause","target":"*","duration_secs":900}' | socat - UNIX-CONNECT:$XDG_RUNTIME_DIR/woluma.sock
+echo '{"cmd":"resume","target":"*"}' | socat - UNIX-CONNECT:$XDG_RUNTIME_DIR/woluma.sock
+# Live snapshots, one per line, until you disconnect:
+echo '{"cmd":"subscribe"}' | socat - UNIX-CONNECT:$XDG_RUNTIME_DIR/woluma.sock
+```
+
+Errors reply `{"ok":false,"error":"..."}`. Each output in a snapshot has `name`, `enabled`,
+`luma`, `rule`, `brightness`, `state` (`active`, `settling`, `paused`, `disabled`), and when
+relevant `pause_reason` (`manual` or `manual-override`), `until` (an RFC 3339 time, or
+`rule-change`) and `settle_remaining_ms`. New fields may be added; existing ones won't change.
+
+### Calibrating rules
+
+1. Before writing any rules, run `woluma watch --raw` and use your usual apps: a dark
+   terminal, a white web page, a video. Without a daemon (or a config), `watch` samples
+   every connected output locally and writes nothing, so it's safe to run any time.
+2. Pick thresholds between the values you saw, and write rules with a final fallback.
+3. Run `woluma check`, then `woluma watch` to see which rule wins and how settle behaves.
+
+### Waybar
+
+```json
+"custom/woluma": {
+  "exec": "woluma status --json | jq -c '{text: (if any(.outputs[]; .enabled) then \"󰃠\" else \"󰃞\" end), tooltip: ([.outputs[] | \"\\(.name): \\(.rule // \"--\") \\(.brightness // \"--\")% \\(.state)\"] | join(\"\\n\")), class: (if any(.outputs[]; .enabled) then \"on\" else \"off\" end)}'",
+  "return-type": "json",
+  "interval": 5,
+  "on-click": "woluma toggle"
+}
+```
+
+When the daemon isn't running, `status` exits 3 and the module shows nothing.
+
 ## License
 
 ISC. Screen capture code is adapted from wluma; see `NOTICE`.

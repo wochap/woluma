@@ -3,7 +3,7 @@
 mod condition;
 mod engine;
 
-pub use condition::{parse_num_cond, parse_time_range, NumCond, TimeRange};
+pub use condition::{parse_num_cond, parse_time_range, NumCond, Op, TimeRange};
 pub use engine::{Engine, Inputs, Transition};
 
 #[derive(Debug, Clone, Default, PartialEq)]

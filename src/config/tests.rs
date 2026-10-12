@@ -326,9 +326,54 @@ fn unreachable_rules_warned() {
         with_rule("name = \"fallback\"\nbrightness = 1")
     );
     let warnings = validate::warnings(&parse(&text).unwrap());
-    assert_eq!(warnings.len(), 1);
-    assert!(warnings[0].contains("later") && warnings[0].contains("fallback"));
+    assert_eq!(warnings.len(), 1, "{warnings:#?}");
+    assert!(
+        warnings[0].contains("'later' is unreachable") && warnings[0].contains("'fallback' always")
+    );
     assert!(validate::warnings(&parse(MINIMAL).unwrap()).is_empty());
+}
+
+fn rules_warnings(rules: &[&str]) -> Vec<String> {
+    let mut text = "[outputs.eDP-1]\nbacklight = \"intel_backlight\"\n".to_string();
+    for (i, when) in rules.iter().enumerate() {
+        text += &format!("[[outputs.eDP-1.rules]]\nname = \"r{i}\"\nbrightness = 1\n{when}\n");
+    }
+    validate::warnings(&parse(&text).unwrap())
+}
+
+#[test]
+fn missing_fallback_warned() {
+    let warnings = rules_warnings(&["when = { luma = \">= 70\" }"]);
+    assert_eq!(warnings.len(), 1);
+    assert!(warnings[0].starts_with("outputs.eDP-1: no fallback rule"));
+    assert!(warnings[0].contains("left unchanged"));
+}
+
+#[test]
+fn contained_rules_warned() {
+    let warnings = rules_warnings(&[
+        "when = { luma = \">= 50\", time = \"20:00-08:00\" }",
+        "when = { luma = \"60..80\", time = \"22:00-06:00\" }",
+        "",
+    ]);
+    assert_eq!(warnings.len(), 1, "{warnings:#?}");
+    assert!(warnings[0].contains("'r1' is unreachable") && warnings[0].contains("'r0' matches"));
+
+    for ok in [
+        ["when = { luma = \"> 50\" }", "when = { luma = \">= 50\" }"],
+        [
+            "when = { luma = \">= 50\", als = \"< 10\" }",
+            "when = { luma = \">= 60\" }",
+        ],
+        [
+            "when = { time = \"20:00-23:00\" }",
+            "when = { time = \"22:00-06:00\" }",
+        ],
+        ["when = { luma = \"!= 50\" }", "when = { luma = \"< 40\" }"],
+    ] {
+        let warnings = rules_warnings(&[ok[0], ok[1], ""]);
+        assert!(warnings.is_empty(), "{ok:?}: {warnings:#?}");
+    }
 }
 
 #[test]

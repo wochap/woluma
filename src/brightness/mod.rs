@@ -7,8 +7,7 @@ pub mod ddc;
 pub mod mapping;
 mod ramp;
 
-#[allow(unused_imports)] // `Status` is read by the control socket (add-control-cli)
-pub use controller::{Connector, Controller, Msg, Profile, Settings, Status, Timing};
+pub use controller::{Connector, Controller, Msg, Profile, RuleUpdate, Settings, Status, Timing};
 
 use anyhow::Result;
 

@@ -5,6 +5,7 @@ mod raw;
 mod validate;
 
 pub use duration::parse_duration;
+pub use validate::warnings;
 
 use crate::rules::Rule;
 use anyhow::{anyhow, Context, Result};

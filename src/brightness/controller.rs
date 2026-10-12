@@ -17,6 +17,8 @@ use std::time::{Duration, Instant, SystemTime};
 /// Opens a device that may not be present yet (DDC); retried until it succeeds.
 pub type Connector = Arc<dyn Fn() -> Result<Box<dyn Device>> + Send + Sync>;
 type Shared = Arc<Mutex<Box<dyn Device>>>;
+/// Receives the actor's status whenever it changes.
+pub type Publish = Arc<dyn Fn(Status) + Send + Sync>;
 
 /// Device-kind specific behavior.
 #[derive(Debug, Clone, Copy)]
@@ -79,6 +81,14 @@ pub struct Settings {
     pub manual_override: ManualOverride,
     pub profile: Profile,
     pub timing: Timing,
+    pub publish: Option<Publish>,
+}
+
+/// A rule activation re-evaluated outside the normal transition flow; stored, not applied.
+pub struct RuleUpdate {
+    pub rule: Option<String>,
+    pub brightness: Option<u8>,
+    pub job: Option<Job>,
 }
 
 pub enum Msg {
@@ -88,12 +98,19 @@ pub enum Msg {
         brightness: Option<u8>,
         job: Option<Job>,
     },
-    #[allow(dead_code)] // issued by the control socket (add-control-cli)
+    /// Manual pause (reason `Requested`); `None` lasts until resumed.
     Pause {
         duration: Option<Duration>,
     },
-    #[allow(dead_code)] // issued by the control socket (add-control-cli)
-    Resume,
+    /// Clears any pause and applies `update` (or the stored rule).
+    Resume {
+        update: Option<RuleUpdate>,
+    },
+    /// Enabling clears any pause and applies `update` (or the stored rule) right away.
+    SetEnabled {
+        enabled: bool,
+        update: Option<RuleUpdate>,
+    },
     Query(async_channel::Sender<Status>),
     Observed(u32),
     HooksFinished(u64),
@@ -102,14 +119,17 @@ pub enum Msg {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Status {
     pub output: String,
+    pub enabled: bool,
     pub current: Option<u8>,
     pub target: Option<u8>,
     pub transitioning: bool,
     pub rule: Option<String>,
     pub paused: bool,
     pub reason: Option<Reason>,
-    /// `None` with `paused` means until the next rule change.
+    /// `None` with `paused` means until the next rule change or until resumed.
     pub until: Option<SystemTime>,
+    /// `paused` until the next rule change.
+    pub until_rule_change: bool,
 }
 
 /// Handle to a running output actor.
@@ -146,6 +166,7 @@ impl Controller {
             next_poll: None,
             next_connect: None,
             reported_failure: false,
+            published: None,
         };
         let task = smol::spawn(actor.run(inbox, device));
         Self { sender, task }
@@ -155,7 +176,6 @@ impl Controller {
         let _ = self.sender.try_send(msg);
     }
 
-    #[allow(dead_code)] // read by the control socket (add-control-cli)
     pub async fn query(&self) -> Option<Status> {
         let (reply, response) = async_channel::bounded(1);
         self.sender.send(Msg::Query(reply)).await.ok()?;
@@ -195,6 +215,7 @@ struct Actor {
     next_poll: Option<Instant>,
     next_connect: Option<Instant>,
     reported_failure: bool,
+    published: Option<Status>,
 }
 
 impl Actor {
@@ -220,6 +241,26 @@ impl Actor {
                 Some(Err(_)) => break,
                 None => self.on_timer(Instant::now()).await,
             }
+            self.publish();
+        }
+    }
+
+    fn publish(&mut self) {
+        let Some(publish) = &self.settings.publish else {
+            return;
+        };
+        let status = self.status();
+        if self.published.as_ref() != Some(&status) {
+            publish(status.clone());
+            self.published = Some(status);
+        }
+    }
+
+    fn store(&mut self, update: Option<RuleUpdate>) {
+        if let Some(update) = update {
+            self.rule = update.rule;
+            self.brightness = update.brightness;
+            self.job = update.job;
         }
     }
 
@@ -327,12 +368,28 @@ impl Actor {
                 ));
                 log::info!("{}: paused on request", self.output());
             }
-            Msg::Resume => {
+            Msg::Resume { update } => {
+                self.store(update);
                 if self.pause.take().is_some() {
                     log::info!("{}: resumed on request", self.output());
                     if self.settings.enabled {
                         self.apply(now).await;
                     }
+                }
+            }
+            Msg::SetEnabled { enabled, update } => {
+                self.store(update);
+                if enabled == self.settings.enabled {
+                    return;
+                }
+                self.settings.enabled = enabled;
+                if enabled {
+                    log::info!("{}: enabled", self.output());
+                    self.pause = None;
+                    self.apply(now).await;
+                } else {
+                    log::info!("{}: disabled", self.output());
+                    self.ramp = None;
                 }
             }
             Msg::Query(reply) => {
@@ -576,6 +633,7 @@ impl Actor {
         };
         Status {
             output: self.settings.output.clone(),
+            enabled: self.settings.enabled,
             current: self.current.and_then(pct),
             target,
             transitioning: self.ramp.is_some(),
@@ -584,8 +642,9 @@ impl Actor {
             reason: self.pause.map(|p| p.reason),
             until: self.pause.and_then(|p| match p.until {
                 Until::At(_, at) => Some(at),
-                Until::RuleChange => None,
+                Until::RuleChange | Until::Resume => None,
             }),
+            until_rule_change: self.pause.is_some_and(|p| p.until == Until::RuleChange),
         }
     }
 }

@@ -17,6 +17,8 @@ pub enum Reason {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Until {
     RuleChange,
+    /// Only an explicit resume ends it.
+    Resume,
     /// Monotonic deadline plus its wall-clock equivalent for reporting.
     At(Instant, SystemTime),
 }
@@ -28,20 +30,25 @@ pub struct Pause {
 }
 
 impl Pause {
-    /// Starts (or restarts) a pause. Without an explicit duration the configured mode decides.
+    /// Starts (or restarts) a pause. Without an explicit duration, a manual-override pause
+    /// follows the configured mode and a requested pause lasts until resumed.
     pub fn start(
         reason: Reason,
         duration: Option<Duration>,
         mode: &ManualOverride,
         now: Instant,
     ) -> Self {
-        let duration = duration.or(match mode {
-            ManualOverride::UntilRuleChange => None,
-            ManualOverride::For(d) => Some(*d),
-        });
-        let until = match duration {
-            Some(d) => Until::At(now + d, SystemTime::now() + d),
-            None => Until::RuleChange,
+        let duration = match reason {
+            Reason::Manual => duration.or(match mode {
+                ManualOverride::UntilRuleChange => None,
+                ManualOverride::For(d) => Some(*d),
+            }),
+            Reason::Requested => duration,
+        };
+        let until = match (duration, reason) {
+            (Some(d), _) => Until::At(now + d, SystemTime::now() + d),
+            (None, Reason::Manual) => Until::RuleChange,
+            (None, Reason::Requested) => Until::Resume,
         };
         Self { reason, until }
     }
@@ -49,7 +56,7 @@ impl Pause {
     pub fn deadline(&self) -> Option<Instant> {
         match self.until {
             Until::At(at, _) => Some(at),
-            Until::RuleChange => None,
+            Until::RuleChange | Until::Resume => None,
         }
     }
 }
@@ -74,5 +81,7 @@ mod tests {
         );
         assert_eq!(p.deadline(), Some(now + Duration::from_secs(600)));
         assert_eq!(p.reason, Reason::Requested);
+        let p = Pause::start(Reason::Requested, None, &m, now);
+        assert_eq!(p.until, Until::Resume);
     }
 }

@@ -53,7 +53,6 @@ impl Engine {
         }
     }
 
-    #[allow(dead_code)] // used by tests and the future control socket
     pub fn active(&self) -> Option<usize> {
         self.active
     }
@@ -69,6 +68,32 @@ impl Engine {
     /// Latest inputs seen, if any.
     pub fn last_inputs(&self) -> Option<Inputs> {
         self.last.map(|(inputs, _)| inputs)
+    }
+
+    /// Time left before a pending rule change takes effect, while settling.
+    pub fn settle_remaining(&self, now: Instant) -> Option<Duration> {
+        let (_, since) = self.candidate?;
+        Some(
+            self.settle
+                .saturating_sub(now.saturating_duration_since(since)),
+        )
+    }
+
+    /// Re-evaluates the latest inputs and switches right away, skipping settle. Returns the
+    /// (possibly unchanged) activation so its hooks can be re-run, or `None` before any input.
+    pub fn force(&mut self) -> Option<Transition> {
+        let (inputs, _) = self.last?;
+        let target = self.evaluate(&inputs);
+        self.started = true;
+        self.candidate = None;
+        let prev = std::mem::replace(&mut self.active, target);
+        self.last = Some((inputs, target));
+        Some(Transition {
+            output: self.output.clone(),
+            prev,
+            next: target,
+            inputs,
+        })
     }
 
     fn matches(&self, when: &When, inputs: &Inputs, widen: bool) -> bool {
@@ -374,6 +399,25 @@ mod tests {
         let t0 = Instant::now();
         assert!(e.step(inputs(88), t0).is_some());
         assert!(feed(&mut e, t0, 500, 50, 88).is_empty());
+    }
+
+    #[test]
+    fn force_skips_settle() {
+        let mut e = standard();
+        let t0 = Instant::now();
+        assert!(e.force().is_none());
+        e.step(inputs(20), t0);
+        e.step(inputs(88), t0 + Duration::from_millis(500));
+        assert_eq!(
+            e.settle_remaining(t0 + Duration::from_millis(800)),
+            Some(Duration::from_millis(1700))
+        );
+        let t = e.force().unwrap();
+        assert_eq!((t.prev, t.next), (Some(2), Some(1)));
+        assert_eq!(e.settle_remaining(t0), None);
+        // Unchanged rule still reports the activation.
+        let t = e.force().unwrap();
+        assert_eq!((t.prev, t.next), (Some(1), Some(1)));
     }
 
     #[test]

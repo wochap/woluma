@@ -108,6 +108,7 @@ fn settings(transition: Duration, mode: ManualOverride) -> Settings {
             hook_cap: Duration::from_secs(2),
             ..Timing::default()
         },
+        publish: None,
     }
 }
 
@@ -339,7 +340,7 @@ fn explicit_resume_applies_and_requested_pause() {
         assert!(until > Duration::from_secs(590));
         assert!(mock.writes().is_empty() && hooks.jobs().is_empty());
 
-        c.send(Msg::Resume);
+        c.send(Msg::Resume { update: None });
         wait(20).await;
         assert_eq!(mock.writes(), vec![102]);
         assert_eq!(hooks.jobs(), vec!["bright"]);
@@ -390,6 +391,126 @@ fn backlight_on_fake_sysfs() {
         wait(200).await;
         let s = status(&c).await;
         assert!(s.paused && s.current == Some(20), "{s:?}");
+        c.close().await;
+    });
+}
+
+fn update(name: &str, brightness: u8) -> Option<RuleUpdate> {
+    Some(RuleUpdate {
+        rule: Some(name.into()),
+        brightness: Some(brightness),
+        job: Some(Job {
+            rule: name.into(),
+            entries: vec!["true".into()],
+            env: vec![],
+        }),
+    })
+}
+
+#[test]
+fn disabling_leaves_brightness_and_enabling_applies_once() {
+    smol::block_on(async {
+        let (mock, hooks) = (Mock::new(179, true), Hooks::default());
+        let c = spawn(
+            &mock,
+            &hooks,
+            settings(Duration::ZERO, ManualOverride::UntilRuleChange),
+        );
+        c.send(rule("bright", Some(40), true));
+        wait(20).await;
+        assert_eq!(mock.writes(), vec![102]);
+        c.send(Msg::SetEnabled {
+            enabled: false,
+            update: None,
+        });
+        c.send(rule("default", Some(70), true));
+        mock.external(30);
+        wait(200).await;
+        let s = status(&c).await;
+        assert!(!s.enabled && !s.paused, "{s:?}");
+        assert_eq!(mock.writes(), vec![102], "nothing written while disabled");
+        assert_eq!(hooks.jobs(), vec!["bright"]);
+
+        c.send(Msg::SetEnabled {
+            enabled: true,
+            update: update("default", 70),
+        });
+        wait(20).await;
+        assert_eq!(mock.writes(), vec![102, 179]);
+        assert_eq!(hooks.jobs(), vec!["bright", "default"]);
+        assert!(status(&c).await.enabled);
+        c.close().await;
+    });
+}
+
+#[test]
+fn resume_after_manual_override_applies_rule() {
+    smol::block_on(async {
+        let (mock, hooks) = (Mock::new(179, true), Hooks::default());
+        let c = spawn(
+            &mock,
+            &hooks,
+            settings(Duration::ZERO, ManualOverride::UntilRuleChange),
+        );
+        c.send(rule("bright", Some(40), false));
+        wait(20).await;
+        mock.external(30);
+        wait(20).await;
+        let s = status(&c).await;
+        assert!(s.paused && s.reason == Some(Reason::Manual) && s.until_rule_change);
+        c.send(Msg::Resume {
+            update: update("bright", 40),
+        });
+        wait(20).await;
+        assert_eq!(mock.value(), 102);
+        assert!(!status(&c).await.paused);
+        c.close().await;
+    });
+}
+
+#[test]
+fn requested_pause_expires_or_waits_for_resume() {
+    smol::block_on(async {
+        let (mock, hooks) = (Mock::new(179, true), Hooks::default());
+        let c = spawn(
+            &mock,
+            &hooks,
+            settings(Duration::ZERO, ManualOverride::UntilRuleChange),
+        );
+        c.send(Msg::Pause {
+            duration: Some(Duration::from_millis(100)),
+        });
+        wait(20).await;
+        assert!(status(&c).await.paused);
+        wait(150).await;
+        assert!(!status(&c).await.paused, "expired");
+
+        c.send(Msg::Pause { duration: None });
+        c.send(rule("bright", Some(40), false));
+        wait(20).await;
+        let s = status(&c).await;
+        assert!(s.paused && !s.until_rule_change, "survives a rule change");
+        assert!(mock.writes().is_empty());
+        c.close().await;
+    });
+}
+
+#[test]
+fn publishes_status_changes() {
+    smol::block_on(async {
+        let (mock, hooks) = (Mock::new(179, true), Hooks::default());
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut s = settings(Duration::ZERO, ManualOverride::UntilRuleChange);
+        let sink = seen.clone();
+        s.publish = Some(Arc::new(move |status: Status| {
+            sink.lock().unwrap().push(status)
+        }));
+        let c = spawn(&mock, &hooks, s);
+        c.send(rule("bright", Some(40), false));
+        wait(20).await;
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(seen.last().unwrap().rule.as_deref(), Some("bright"));
+        assert_eq!(seen.last().unwrap().current, Some(40));
         c.close().await;
     });
 }

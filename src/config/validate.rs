@@ -2,7 +2,7 @@ use super::{
     parse_duration, raw, Als, Backend, Config, ConfigErrors, General, Hysteresis, ManualOverride,
     Output, DEFAULT_ALS_FRAMES, DEFAULT_ALS_INTERVAL,
 };
-use crate::rules::{parse_num_cond, parse_time_range, Rule, When};
+use crate::rules::{parse_num_cond, parse_time_range, NumCond, Op, Rule, When};
 use std::collections::HashSet;
 use std::time::Duration;
 
@@ -43,26 +43,97 @@ pub fn validate(raw: raw::Config) -> Result<Config, ConfigErrors> {
     }
 }
 
-/// Non-fatal findings, logged at startup.
+/// Non-fatal findings: logged at startup and printed by `woluma check`.
 pub fn warnings(config: &Config) -> Vec<String> {
     let mut warnings = Vec::new();
     for output in &config.outputs {
-        if let Some(index) = output.rules.iter().position(|r| r.when.is_empty()) {
-            let unreachable: Vec<_> = output.rules[index + 1..]
-                .iter()
-                .map(|r| r.name.as_str())
-                .collect();
-            if !unreachable.is_empty() {
+        let rules = &output.rules;
+        for (j, later) in rules.iter().enumerate() {
+            if let Some(earlier) = rules[..j].iter().find(|r| covers(&r.when, &later.when)) {
+                let why = if earlier.when.is_empty() {
+                    "always matches"
+                } else {
+                    "matches whenever it would"
+                };
                 warnings.push(format!(
-                    "outputs.{}: rule '{}' always matches, so later rules are unreachable: {}",
-                    output.name,
-                    output.rules[index].name,
-                    unreachable.join(", ")
+                    "outputs.{}: rule '{}' is unreachable: earlier rule '{}' {why}",
+                    output.name, later.name, earlier.name
                 ));
             }
         }
+        if !rules.last().is_some_and(|r| r.when.is_empty()) {
+            warnings.push(format!(
+                "outputs.{}: no fallback rule (a last rule without `when`); brightness is left \
+                 unchanged when nothing matches",
+                output.name
+            ));
+        }
     }
     warnings
+}
+
+/// Whether `a` matches every input `b` matches. Conservative: per-input interval and
+/// time-range containment only.
+fn covers(a: &When, b: &When) -> bool {
+    let num = |a: &Option<NumCond>, b: &Option<NumCond>| match (a, b) {
+        (None, _) => true,
+        (Some(_), None) => false,
+        (Some(a), Some(b)) => match (interval(a), interval(b)) {
+            (Some(a), Some(b)) => a.contains(&b),
+            _ => a == b,
+        },
+    };
+    let time = match (&a.time, &b.time) {
+        (None, _) => true,
+        (Some(_), None) => false,
+        (Some(a), Some(b)) => (0..24 * 60)
+            .filter_map(|m| chrono::NaiveTime::from_hms_opt(m / 60, m % 60, 0))
+            .all(|t| !b.contains(t) || a.contains(t)),
+    };
+    num(&a.luma, &b.luma) && num(&a.als, &b.als) && time
+}
+
+/// A condition's matching set within 0-100; `None` for `!=`.
+#[derive(Debug, Clone, Copy)]
+struct Interval {
+    lo: f64,
+    lo_open: bool,
+    hi: f64,
+    hi_open: bool,
+}
+
+impl Interval {
+    fn contains(&self, other: &Interval) -> bool {
+        let lo = self.lo < other.lo || (self.lo == other.lo && (!self.lo_open || other.lo_open));
+        let hi = self.hi > other.hi || (self.hi == other.hi && (!self.hi_open || other.hi_open));
+        lo && hi
+    }
+}
+
+fn interval(cond: &NumCond) -> Option<Interval> {
+    let closed = |lo, hi| Interval {
+        lo,
+        lo_open: false,
+        hi,
+        hi_open: false,
+    };
+    Some(match *cond {
+        NumCond::Range { lo, hi } => closed(lo, hi),
+        NumCond::Cmp { op, value } => match op {
+            Op::Lt => Interval {
+                hi_open: true,
+                ..closed(0.0, value)
+            },
+            Op::Le => closed(0.0, value),
+            Op::Gt => Interval {
+                lo_open: true,
+                ..closed(value, 100.0)
+            },
+            Op::Ge => closed(value, 100.0),
+            Op::Eq => closed(value, value),
+            Op::Ne => return None,
+        },
+    })
 }
 
 fn duration(value: &toml::Value, path: &str, errors: &mut Errors) -> Option<Duration> {

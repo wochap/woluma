@@ -4,6 +4,7 @@
 
 pub mod capturer;
 mod object;
+pub mod outputs;
 pub mod vulkan;
 
 use anyhow::{anyhow, Result};
@@ -66,6 +67,21 @@ pub fn luma_stream(output: String, active: Arc<AtomicBool>) -> async_channel::Re
         .spawn(move || supervise(&output, sender, active))
         .expect("unable to spawn capture thread");
     receiver
+}
+
+/// Captures one luma sample from `output`, or `None` if none arrives within `timeout`.
+pub fn sample_once(output: &str, timeout: Duration) -> Option<u8> {
+    let active = Arc::new(AtomicBool::new(true));
+    let stream = luma_stream(output.to_string(), active.clone());
+    let luma = smol::block_on(futures_lite::future::or(
+        async { stream.recv().await.ok() },
+        async {
+            smol::Timer::after(timeout).await;
+            None
+        },
+    ));
+    active.store(false, Ordering::Relaxed);
+    luma
 }
 
 fn supervise(output: &str, sender: async_channel::Sender<u8>, active: Arc<AtomicBool>) {
