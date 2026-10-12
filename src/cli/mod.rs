@@ -2,12 +2,14 @@
 
 mod check;
 mod client;
+pub mod complete;
 mod render;
 mod watch;
 
 use crate::control::Request;
 use crate::{config, daemon};
 use clap::{Args, Parser, Subcommand};
+use clap_complete::engine::ArgValueCompleter;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
@@ -29,7 +31,6 @@ pub struct Cli {
 
 impl Cli {
     /// The clap command tree, for generating shell completions.
-    #[allow(dead_code)] // used by add-zsh-completions
     pub fn command() -> clap::Command {
         <Self as clap::CommandFactory>::command()
     }
@@ -42,20 +43,22 @@ pub enum Command {
     /// Enable or disable automation for an output, or all outputs
     Toggle {
         /// Output name, or `*` for all outputs
-        #[arg(default_value = "*")]
+        #[arg(default_value = "*", add = ArgValueCompleter::new(complete::output_candidates))]
         target: String,
     },
     /// Pause automation until resumed or for a duration
     Pause {
         /// Output name, or `*` for all outputs
+        #[arg(add = ArgValueCompleter::new(complete::output_candidates))]
         target: String,
         /// How long to pause, e.g. `90s`, `15m`, `1h30m`
-        #[arg(value_parser = parse_duration)]
+        #[arg(value_parser = parse_duration, add = ArgValueCompleter::new(complete::no_candidates))]
         duration: Option<Duration>,
     },
     /// Clear a pause and apply the current rule now
     Resume {
         /// Output name, or `*` for all outputs
+        #[arg(add = ArgValueCompleter::new(complete::output_candidates))]
         target: String,
     },
     /// Show the daemon's current state
@@ -71,6 +74,11 @@ pub enum Command {
         /// Validate only: no Wayland, socket or hardware access
         #[arg(long)]
         offline: bool,
+    },
+    /// Print a shell completion script (zsh, bash or fish)
+    Completions {
+        #[arg(value_enum)]
+        shell: complete::Shell,
     },
 }
 
@@ -143,6 +151,10 @@ pub fn run(cli: Cli) -> ExitCode {
         Command::Status { json } => client::status(json),
         Command::Watch(args) => watch::run(args, config_path),
         Command::Check { offline } => check::run(config_path, offline),
+        Command::Completions { shell } => {
+            complete::print_script(shell);
+            Ok(())
+        }
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -182,13 +194,14 @@ mod tests {
     fn top_level_help_lists_commands() {
         let help = help(&["woluma", "--help"]);
         for line in [
-            "  daemon  Run the daemon and serve the control socket (default)",
-            "  toggle  Enable or disable automation for an output, or all outputs",
-            "  pause   Pause automation until resumed or for a duration",
-            "  resume  Clear a pause and apply the current rule now",
-            "  status  Show the daemon's current state",
-            "  watch   Stream live luma, ALS, rule and brightness values",
-            "  check   Validate the config and show which rule each output matches now",
+            "  daemon       Run the daemon and serve the control socket (default)",
+            "  toggle       Enable or disable automation for an output, or all outputs",
+            "  pause        Pause automation until resumed or for a duration",
+            "  resume       Clear a pause and apply the current rule now",
+            "  status       Show the daemon's current state",
+            "  watch        Stream live luma, ALS, rule and brightness values",
+            "  check        Validate the config and show which rule each output matches now",
+            "  completions  Print a shell completion script (zsh, bash or fish)",
             "      --config <PATH>  Config file (default: $XDG_CONFIG_HOME/woluma/config.toml)",
         ] {
             assert!(help.contains(line), "missing {line:?} in:\n{help}");
@@ -216,6 +229,11 @@ mod tests {
             ("status", "Usage: woluma status [OPTIONS]", "--json"),
             ("watch", "Usage: woluma watch [OPTIONS]", "--raw"),
             ("check", "Usage: woluma check [OPTIONS]", "--offline"),
+            (
+                "completions",
+                "Usage: woluma completions [OPTIONS] <SHELL>",
+                "zsh",
+            ),
             ("daemon", "Usage: woluma daemon [OPTIONS]", "--config"),
         ];
         for (command, usage, detail) in expect {

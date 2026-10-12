@@ -33,6 +33,8 @@ ddc-i2c = { version = "0.2.2", default-features = false, features = ["with-linux
 ddc = "0.2"
 edid = "0.3.0"
 serde_json = "1.0.151"
+# Pinned exactly: the `unstable-dynamic` API (CompleteEnv, ArgValueCompleter) is semver-exempt.
+clap_complete = { version = "=4.6.11", features = ["unstable-dynamic"] }
 
 [profile.release]
 lto = true

@@ -199,6 +199,17 @@ relevant `pause_reason` (`manual` or `manual-override`), `until` (an RFC 3339 ti
 
 When the daemon isn't running, `status` exits 3 and the module shows nothing.
 
+### Shell completions
+
+Subcommands, flags and output names (from the running daemon, else the config) complete in
+zsh, bash and fish:
+
+```sh
+woluma completions zsh > "${fpath[1]}/_woluma"            # then restart zsh
+woluma completions bash > ~/.local/share/bash-completion/completions/woluma
+woluma completions fish > ~/.config/fish/completions/woluma.fish
+```
+
 ## License
 
 ISC. Screen capture code is adapted from wluma; see `NOTICE`.
