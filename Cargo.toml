@@ -1,0 +1,34 @@
+[package]
+name = "woluma"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+license = "ISC"
+description = "Rule-based screen-content aware brightness daemon for Wayland"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+smol = "2"
+async-process = "2"
+async-channel = "2"
+async-signal = "0.2"
+futures-lite = "2"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+chrono = "0.4"
+log = "0.4"
+env_logger = "0.11"
+anyhow = "1"
+thiserror = "2"
+libc = "0.2"
+ash = { version = "0.38", features = ["loaded"], default-features = false }
+drm-fourcc = "2.2"
+wayland-client = "0.31"
+wayland-backend = { version = "0.3", features = ["dlopen"] }
+wayland-protocols = { version = "0.32", features = ["client", "staging", "unstable"] }
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+
+[profile.release]
+lto = true
+strip = true
+codegen-units = 1
