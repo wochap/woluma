@@ -210,6 +210,51 @@ woluma completions bash > ~/.local/share/bash-completion/completions/woluma
 woluma completions fish > ~/.config/fish/completions/woluma.fish
 ```
 
+## Nix
+
+The flake provides `packages.<system>.woluma`, `overlays.default`, a home-manager module
+(daemon, CLI, config) and a NixOS module (hardware permissions):
+
+```nix
+# flake.nix
+inputs.woluma.url = "github:wochap/woluma";
+
+# NixOS configuration
+imports = [ inputs.woluma.nixosModules.default ];
+hardware.graphics.enable = true; # Vulkan, for screen capture
+services.woluma = {
+  users = [ "alice" ];   # added to `video` (and `i2c` with DDC)
+  ddc.enable = true;     # external monitors over DDC/CI
+  # backlight.enable = true (default): udev rules for backlight/LED brightness
+};
+
+# home-manager configuration
+imports = [ inputs.woluma.homeManagerModules.default ];
+services.woluma = {
+  enable = true;
+  extraPackages = [ pkgs.libnotify ]; # on the service PATH, for `run` hooks
+  settings = {
+    general.settle = "2s";
+    outputs.eDP-1 = {
+      backlight = "intel_backlight";
+      rules = [
+        { name = "bright"; when.luma = ">= 70"; brightness = 40; run = [ "notify-send woluma bright" ]; }
+        { name = "default"; brightness = 70; }
+      ];
+    };
+  };
+};
+```
+
+`settings` is rendered to `~/.config/woluma/config.toml` and validated at build time with
+`woluma check --offline` (`checkConfig = false` skips that). With empty `settings` the file is
+left unmanaged. The user service is bound to `graphical-session.target` and restarts when the
+config changes.
+
+udev rules apply when a device is added: after the first switch, reboot or run
+`sudo udevadm trigger --subsystem-match=backlight --subsystem-match=leds`. Group changes
+take effect at the next login.
+
 ## License
 
 ISC. Screen capture code is adapted from wluma; see `NOTICE`.
