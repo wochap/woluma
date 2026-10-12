@@ -299,3 +299,54 @@ fn unreachable_rules_warned() {
     assert!(warnings[0].contains("later") && warnings[0].contains("fallback"));
     assert!(validate::warnings(&parse(MINIMAL).unwrap()).is_empty());
 }
+
+#[test]
+fn brightness_timing_values() {
+    let general = |body: &str| parse(&format!("[general]\n{body}\n{MINIMAL}")).map(|c| c.general);
+    assert_eq!(
+        general("transition = \"0s\"").unwrap().transition,
+        Duration::ZERO
+    );
+    assert_eq!(
+        general("manual_override = \"15m\"")
+            .unwrap()
+            .manual_override,
+        ManualOverride::For(Duration::from_secs(900))
+    );
+    assert_eq!(
+        general("manual_override = \"until-rule-change\"")
+            .unwrap()
+            .manual_override,
+        ManualOverride::UntilRuleChange
+    );
+    for bad in ["\"0s\"", "\"-1m\"", "15", "\"until-rule\""] {
+        assert_error(
+            &format!("[general]\nmanual_override = {bad}\n{MINIMAL}"),
+            &["general.manual_override"],
+        );
+    }
+    assert_error(
+        &format!("[general]\ntransition = \"fast\"\n{MINIMAL}"),
+        &["general.transition"],
+    );
+
+    let ddc = |poll: &str| {
+        let text = format!("[outputs.DP-1]\nddcutil = \"DELL\"\n{poll}\n[[outputs.DP-1.rules]]\nname = \"d\"\nbrightness = 1\n");
+        parse(&text).map(|c| c.outputs[0].backend.clone())
+    };
+    let poll_of = |b: Backend| match b {
+        Backend::Ddcutil { poll, .. } => poll,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(poll_of(ddc("").unwrap()), None);
+    assert_eq!(poll_of(ddc("poll = \"0\"").unwrap()), Some(Duration::ZERO));
+    assert_eq!(
+        poll_of(ddc("poll = \"2s\"").unwrap()),
+        Some(Duration::from_secs(2))
+    );
+    assert!(ddc("poll = \"often\"")
+        .unwrap_err()
+        .0
+        .iter()
+        .any(|e| e.contains("outputs.DP-1.poll")));
+}

@@ -1,7 +1,8 @@
 //! Wires luma, clock and ALS inputs into per-output engines and dispatches hooks.
 
+use crate::brightness::{self, backlight::Backlight, ddc::Ddc, Controller, Device, Msg};
 use crate::capture;
-use crate::config::Config;
+use crate::config::{Backend, Config, Output, DEFAULT_POLL};
 use crate::hooks::{self, HookQueue, Job};
 use crate::rules::{Engine, Inputs, Transition};
 use anyhow::{Context, Result};
@@ -47,6 +48,42 @@ pub fn next_tick_delay(boundaries: &[NaiveTime], now: NaiveTime) -> Duration {
         .min(MAX_TICK)
 }
 
+/// Opens the output's device and starts its controller. A missing backlight is fatal; a
+/// missing DDC display is retried by the controller.
+fn controller(config: &Config, output: &Output, queue: &HookQueue) -> Result<Controller> {
+    let (profile, device, connector): (_, Option<Box<dyn Device>>, Option<brightness::Connector>) =
+        match &output.backend {
+            Backend::Backlight(name) => (
+                brightness::Profile::backlight(),
+                Some(Box::new(Backlight::open(&output.name, name)?)),
+                None,
+            ),
+            Backend::Ddcutil { display, poll } => {
+                let display = display.clone();
+                (
+                    brightness::Profile::ddc(poll.unwrap_or(DEFAULT_POLL)),
+                    None,
+                    Some(Arc::new(move || {
+                        Ddc::find(&display).map(|d| Box::new(d) as Box<dyn Device>)
+                    })),
+                )
+            }
+        };
+    Ok(Controller::spawn(
+        brightness::Settings {
+            output: output.name.clone(),
+            enabled: config.general.enabled,
+            transition: config.general.transition,
+            manual_override: config.general.manual_override.clone(),
+            profile,
+            timing: brightness::Timing::default(),
+        },
+        device,
+        connector,
+        Arc::new(queue.handle()),
+    ))
+}
+
 pub fn run(config: Config) -> Result<()> {
     smol::block_on(run_async(config))
 }
@@ -60,6 +97,7 @@ async fn run_async(config: Config) -> Result<()> {
 
     let mut engines = Vec::new();
     let mut queues = Vec::new();
+    let mut controllers = Vec::new();
     let mut boundaries = Vec::new();
     for (index, output) in config.outputs.iter().enumerate() {
         boundaries.extend(
@@ -75,11 +113,13 @@ async fn run_async(config: Config) -> Result<()> {
             config.general.settle,
             config.hysteresis,
         ));
-        queues.push(HookQueue::spawn(
+        let queue = HookQueue::spawn(
             output.name.clone(),
             hooks::DEFAULT_TIMEOUT,
             hooks_shutdown.clone(),
-        ));
+        );
+        controllers.push(controller(&config, output, &queue)?);
+        queues.push(queue);
 
         let stream = capture::luma_stream(output.name.clone(), capture_active.clone());
         let events = events.clone();
@@ -135,15 +175,8 @@ async fn run_async(config: Config) -> Result<()> {
     if config.als != crate::config::Als::None {
         log::info!("Ambient light sources are not supported yet; the ALS reading stays unknown");
     }
-    for output in &config.outputs {
-        log::debug!(
-            "{}: brightness backend {:?} (not written yet)",
-            output.name,
-            output.backend
-        );
-    }
     if !config.general.enabled {
-        log::info!("Daemon is disabled: rules are tracked but hooks will not run");
+        log::info!("Daemon is disabled: rules are tracked but brightness and hooks are left alone");
     }
     log::info!(
         "woluma started for outputs: {}",
@@ -156,7 +189,7 @@ async fn run_async(config: Config) -> Result<()> {
     );
 
     let mut als_value: Option<u8> = None;
-    let dispatch = |engine: &Engine, queue: &HookQueue, transition: Option<Transition>| {
+    let dispatch = |engine: &Engine, controller: &Controller, transition: Option<Transition>| {
         let Some(transition) = transition else { return };
         let name = |i: Option<usize>| i.map_or("<none>", |i| engine.rules()[i].name.as_str());
         log::info!(
@@ -171,11 +204,12 @@ async fn run_async(config: Config) -> Result<()> {
                 .map_or("unknown".into(), |a| a.to_string()),
             transition.inputs.now.format("%H:%M"),
         );
-        if config.general.enabled {
-            if let Some(job) = Job::from_transition(&transition, engine.rules()) {
-                queue.enqueue(job);
-            }
-        }
+        let rule = transition.next.map(|i| &engine.rules()[i]);
+        controller.send(Msg::RuleChanged {
+            rule: rule.map(|r| r.name.clone()),
+            brightness: rule.and_then(|r| r.brightness),
+            job: Job::from_transition(&transition, engine.rules()),
+        });
     };
 
     while let Ok(event) = inbox.recv().await {
@@ -191,7 +225,7 @@ async fn run_async(config: Config) -> Result<()> {
                     },
                     Instant::now(),
                 );
-                dispatch(&engines[index], &queues[index], transition);
+                dispatch(&engines[index], &controllers[index], transition);
             }
             Event::Als(_) | Event::Tick => {
                 if let Event::Als(reading) = event {
@@ -201,7 +235,7 @@ async fn run_async(config: Config) -> Result<()> {
                     log::trace!("als {reading:?}");
                     als_value = reading;
                 }
-                for (engine, queue) in engines.iter_mut().zip(&queues) {
+                for (engine, controller) in engines.iter_mut().zip(&controllers) {
                     if let Some(last) = engine.last_inputs() {
                         let transition = engine.step(
                             Inputs {
@@ -211,7 +245,7 @@ async fn run_async(config: Config) -> Result<()> {
                             },
                             Instant::now(),
                         );
-                        dispatch(engine, queue, transition);
+                        dispatch(engine, controller, transition);
                     }
                 }
             }
@@ -221,6 +255,9 @@ async fn run_async(config: Config) -> Result<()> {
 
     capture_active.store(false, Ordering::Relaxed);
     hooks_shutdown.store(true, Ordering::Relaxed);
+    for controller in controllers {
+        controller.close().await;
+    }
     for queue in queues {
         queue.close().await;
     }

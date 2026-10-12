@@ -56,57 +56,93 @@ pub fn env(transition: &Transition, rules: &[Rule]) -> Vec<(String, String)> {
     ]
 }
 
+/// Something that runs a job's hooks; the returned receiver closes once the job is done.
+pub trait HookRunner: Send + Sync {
+    fn dispatch(&self, job: Job) -> async_channel::Receiver<()>;
+}
+
+/// A queued job and the sender whose drop signals its completion.
+type Queued = (Job, Option<async_channel::Sender<()>>);
+
 /// Handle to one output's hook worker.
 pub struct HookQueue {
-    output: String,
-    sender: async_channel::Sender<Job>,
-    pending: Arc<AtomicUsize>,
+    handle: HookHandle,
     worker: smol::Task<()>,
+}
+
+/// Cloneable enqueue side of a [`HookQueue`].
+#[derive(Clone)]
+pub struct HookHandle {
+    output: String,
+    sender: async_channel::Sender<Queued>,
+    pending: Arc<AtomicUsize>,
 }
 
 impl HookQueue {
     pub fn spawn(output: String, timeout: Duration, shutdown: Arc<AtomicBool>) -> Self {
-        let (sender, receiver) = async_channel::unbounded::<Job>();
+        let (sender, receiver) = async_channel::unbounded::<Queued>();
         let pending = Arc::new(AtomicUsize::new(0));
         let worker = {
             let output = output.clone();
             let pending = pending.clone();
             smol::spawn(async move {
-                while let Ok(job) = receiver.recv().await {
+                while let Ok((job, done)) = receiver.recv().await {
                     if !shutdown.load(Ordering::Relaxed) {
                         run_job(&output, &job, timeout).await;
                     }
                     pending.fetch_sub(1, Ordering::SeqCst);
+                    drop(done);
                 }
             })
         };
         Self {
-            output,
-            sender,
-            pending,
+            handle: HookHandle {
+                output,
+                sender,
+                pending,
+            },
             worker,
         }
     }
 
-    /// Enqueues a job without waiting for it to run.
-    pub fn enqueue(&self, job: Job) {
-        self.pending.fetch_add(1, Ordering::SeqCst);
-        if self.sender.try_send(job).is_err() {
-            self.pending.fetch_sub(1, Ordering::SeqCst);
-            log::error!("Hook queue for '{}' is closed", self.output);
-        }
+    pub fn handle(&self) -> HookHandle {
+        self.handle.clone()
     }
 
-    /// True when no hook job is queued or running. Used later for brightness-change detection.
-    #[allow(dead_code)] // consumed by add-brightness-control
+    /// Enqueues a job without waiting for it to run.
+    #[cfg(test)]
+    pub fn enqueue(&self, job: Job) {
+        self.handle.enqueue(job, None);
+    }
+
+    /// True when no hook job is queued or running.
+    #[cfg(test)]
     pub fn is_idle(&self) -> bool {
-        self.pending.load(Ordering::SeqCst) == 0
+        self.handle.pending.load(Ordering::SeqCst) == 0
     }
 
     /// Stops accepting jobs and waits for the worker to finish.
     pub async fn close(self) {
-        self.sender.close();
+        self.handle.sender.close();
         self.worker.await;
+    }
+}
+
+impl HookHandle {
+    fn enqueue(&self, job: Job, done: Option<async_channel::Sender<()>>) {
+        self.pending.fetch_add(1, Ordering::SeqCst);
+        if self.sender.try_send((job, done)).is_err() {
+            self.pending.fetch_sub(1, Ordering::SeqCst);
+            log::error!("Hook queue for '{}' is closed", self.output);
+        }
+    }
+}
+
+impl HookRunner for HookHandle {
+    fn dispatch(&self, job: Job) -> async_channel::Receiver<()> {
+        let (done, finished) = async_channel::bounded(1);
+        self.enqueue(job, Some(done));
+        finished
     }
 }
 
@@ -317,5 +353,25 @@ mod tests {
             queue.close().await;
         });
         assert_eq!(std::fs::read_to_string(&f).unwrap(), "0\n1\n2\n");
+    }
+
+    #[test]
+    fn dispatch_signals_completion() {
+        smol::block_on(async {
+            let queue = HookQueue::spawn(
+                "eDP-1".into(),
+                DEFAULT_TIMEOUT,
+                Arc::new(AtomicBool::new(false)),
+            );
+            let finished = queue.handle().dispatch(Job {
+                rule: "r".into(),
+                entries: vec!["sleep 0.1".into()],
+                env: vec![],
+            });
+            assert!(finished.try_recv().is_err() && !finished.is_closed());
+            assert!(finished.recv().await.is_err());
+            assert!(queue.is_idle());
+            queue.close().await;
+        });
     }
 }

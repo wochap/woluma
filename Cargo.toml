@@ -27,6 +27,11 @@ wayland-client = "0.31"
 wayland-backend = { version = "0.3", features = ["dlopen"] }
 wayland-protocols = { version = "0.32", features = ["client", "staging", "unstable"] }
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+zbus = { version = "5.19.0", default-features = false, features = ["async-io", "blocking-api"] }
+inotify = { version = "0.11.5", default-features = false }
+ddc-i2c = { version = "0.2.2", default-features = false, features = ["with-linux"] }
+ddc = "0.2"
+edid = "0.3.0"
 
 [profile.release]
 lto = true

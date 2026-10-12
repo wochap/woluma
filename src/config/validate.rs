@@ -96,12 +96,16 @@ fn general(raw: raw::General, errors: &mut Errors) -> General {
     if let Some(value) = raw.manual_override {
         if value.as_str() == Some("until-rule-change") {
             general.manual_override = ManualOverride::UntilRuleChange;
-        } else if let Some(d) = value.as_str().and_then(parse_duration) {
+        } else if let Some(d) = value
+            .as_str()
+            .and_then(parse_duration)
+            .filter(|d| !d.is_zero())
+        {
             general.manual_override = ManualOverride::For(d);
         } else {
             errors.push(
                 "general.manual_override",
-                format!("invalid value {value}, expected \"until-rule-change\" or a duration like \"10m\""),
+                format!("invalid value {value}, expected \"until-rule-change\" or a positive duration like \"10m\""),
             );
         }
     }
@@ -188,9 +192,11 @@ fn output(name: String, raw: raw::Output, errors: &mut Errors) -> Option<Output>
             Some(Backend::Backlight(device))
         }
         (None, Some(display)) => {
-            let poll = raw
-                .poll
-                .and_then(|p| duration(&p, &format!("{path}.poll"), errors));
+            // `poll = "0"` turns external change detection off.
+            let poll = raw.poll.and_then(|p| match p.as_str() {
+                Some("0") => Some(Duration::ZERO),
+                _ => duration(&p, &format!("{path}.poll"), errors),
+            });
             Some(Backend::Ddcutil { display, poll })
         }
     };

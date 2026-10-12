@@ -1,7 +1,9 @@
+mod brightness;
 mod capture;
 mod config;
 mod daemon;
 mod hooks;
+mod manual_override;
 mod rules;
 
 use clap::{Parser, Subcommand};

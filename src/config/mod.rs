@@ -71,9 +71,12 @@ pub enum Backend {
     Backlight(String),
     Ddcutil {
         display: String,
+        /// `None` means the default; zero disables polling.
         poll: Option<Duration>,
     },
 }
+
+pub const DEFAULT_POLL: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone)]
 pub struct Output {
